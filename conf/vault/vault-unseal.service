@@ -1,0 +1,25 @@
+[Unit]
+Description="vault-yubikey-helper unseal"
+Documentation=https://github.com/jmanero/vault-yubikey-helper
+
+## Wait for vault.service to start before attempting unseal
+After=vault.service
+ConditionFileNotEmpty=/var/lib/vault/yubikey-seal.json
+
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/vault/vault.env
+
+## Wait for the Vault server to start
+ExecStartPre=/usr/bin/sleep 15
+ExecStart=/usr/local/libexec/vault-yubikey-helper unseal /var/lib/vault/yubikey-seal.json
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+## Start with vault.service
+WantedBy=vault.service

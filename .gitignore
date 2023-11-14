@@ -1,0 +1,5 @@
+ca/
+.cache/
+bin/
+.DS_Store
+yubikey-seal.json

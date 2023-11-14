@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -e
+
+rotate=no
+owner=root
+group=$(id -gn root) ## root or wheel?
+
+## Nomad-isms; datacenter -> vault cluster_name
+datacenter=default
+region=us
+
+## Generate an EC:P256 key
+key_type=ec
+key_curve="-pkeyopt ec_paramgen_curve:prime256v1"
+
+## Defaults for a server+client certificate
+usage="nonRepudiation,digitalSignature,keyEncipherment"
+extended_usage="serverAuth,clientAuth"
+
+## Check if openssl req arguments contain a value
+function has_arg {
+  echo $req_args | grep -q -- $1
+}
+
+mkdir -p ca/{requests,certs}
+
+while [ -n "$1" ]; do
+  case $1 in
+  "--path")
+    shift
+    path="$1"
+  ;;
+  "--owner")
+    shift
+    owner="$1"
+  ;;
+  "--group")
+    shift
+    group="$1"
+  ;;
+
+  "--datacenter")
+    shift
+    datacenter="$1"
+    ;;
+  "--region")
+    shift
+    region="$1"
+    ;;
+
+  "--key-type")
+    shift
+    key_type="$1"
+    key_curve=""
+    ;;
+  "--key-curve")
+    shift
+    key_curve="$1"
+    ;;
+
+  "--usage")
+    shift
+    usage="$1"
+    ;;
+  "--server")
+    extended_usage="serverAuth"
+    ;;
+  "--client")
+    extended_usage="clientAuth"
+    ;;
+
+  "--driver")
+    shift
+    driver="$1"
+    ;;
+  "--local")
+    driver="bash"
+    ;;
+
+  "--subject")
+    shift
+    subject="$1"
+    ;;
+  -*) ## Add to openssl req arguments
+    req_args="$req_args $1 $2"
+    shift
+    ;;
+
+  *)
+    break
+  esac
+  shift
+done
+
+target="$1"
+if [ -z "$target" ]; then
+  echo "Missing required TARGET and NAME arguments" >&2
+  usage
+fi
+
+name="$2"
+if [ -z "$name" ]; then
+  echo "Missing required NAME argument" >&2
+  usage
+fi
+
+## Default path and driver if --path/--local/--driver are unset
+if [ -z "$path" ];    then path="/var/cert/$name"; fi
+if [ -z "$subject" ]; then subject="/CN=${target}/DC=${datacenter}/C=${region}"; fi
+if [ -z "$driver" ];  then driver="$(which ssh) -q $target bash"; fi
+
+## Build default required args for a valid certificate
+if ! has_arg subjectAltName;        then req_args="$req_args -addext subjectAltName=DNS:${target}"; fi
+if ! has_arg keyUsage;              then req_args="$req_args -addext keyUsage=critical,$usage"; fi
+if ! has_arg extendedKeyUsage;      then req_args="$req_args -addext extendedKeyUsage=$extended_usage"; fi
+if ! has_arg subjectKeyIdentifier;  then req_args="$req_args -addext subjectKeyIdentifier=hash"; fi
+
+echo "Generating new CSR for $target:$path  name: $name owner:$owner group:$group driver:$driver" >&2
+
+## Do it.
+$driver >"ca/requests/${name}-${target}.pem" <<SCRIPT
+set -e
+
+sudo mkdir -p "$path"
+sudo chmod -R 0700 "$path"
+sudo chown -R "$owner":"$group" "$path"
+
+if sudo [ -f "${path}/key.pem" -a "$rotate" != "yes" ]; then
+  echo "Using existing key at ${target}:${path}/key.pem" >&2
+  key_args="-key ${path}/key.pem"
+else
+  echo "Generating new $key_type key at ${target}:${path}/key.pem" >&2
+  key_args="-newkey $key_type $key_curve -nodes -keyout ${path}/key.pem"
+fi
+
+## Print CSR back to driver's STDOUT
+sudo openssl req -new -subj $subject $req_args \$key_args
+sudo chmod 0400 "${path}/key.pem"
+sudo chown "$owner":"$group" "${path}/key.pem"
+SCRIPT
+
+echo "Wrote CSR to ca/requests/${name}-${target}.pem" >&2

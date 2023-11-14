@@ -1,0 +1,41 @@
+[Unit]
+Description="HashiCorp Vault Server"
+Documentation=https://developer.hashicorp.com/vault/docs
+
+Requires=network-online.target
+After=network-online.target
+ConditionFileNotEmpty=/etc/vault/vault.hcl
+
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/vault/vault.env
+
+ExecStart=/usr/local/bin/vault server -config=/etc/vault/
+ExecReload=/bin/kill --signal HUP $MAINPID
+ExecStop=/bin/kill -INT $MAINPID
+
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5
+
+User=vault
+Group=vault
+
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+SecureBits=keep-caps
+AmbientCapabilities=CAP_IPC_LOCK
+CapabilityBoundingSet=CAP_SYSLOG CAP_IPC_LOCK
+NoNewPrivileges=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

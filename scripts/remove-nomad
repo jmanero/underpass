@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -e
+
+if [ -z "$1" ]; then
+  echo "Missing required argument TARGET" >&2
+  exit 1
+fi
+
+ssh "$1" <<SCRIPT
+set -ex
+
+sudo systemctl disable --now nomad.service
+sudo rm -rf /usr/local/libexec/nomad /etc/nomad /var/data/{ephemeral,nomad}
+sudo rm /usr/local/bin/nomad
+sudo rm /etc/systemd/system/nomad.service
+SCRIPT

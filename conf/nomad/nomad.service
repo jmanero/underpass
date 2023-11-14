@@ -1,0 +1,28 @@
+[Unit]
+Description="Hashicorp Nomad Agent"
+Documentation=https://nomadproject.io/docs/
+
+Wants=network-online.target podman.socket
+After=network-online.target podman.socket
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/nomad.d/nomad.env
+
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=/usr/local/bin/nomad agent -config /etc/nomad/
+ExecStop=/bin/kill -INT $MAINPID
+
+KillMode=control-group
+KillSignal=SIGINT
+
+Restart=on-failure
+RestartSec=2
+
+LimitNOFILE=65536
+LimitNPROC=infinity
+TasksMax=infinity
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=default.target

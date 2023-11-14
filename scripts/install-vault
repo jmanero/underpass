@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -e
+
+usage() {
+  cat >&2 <<USAGE
+  USAGE: $0 [--datacenter DC] [--region REGION] [--os OS] [--arch ARCH] [--env FILE] TARGET
+USAGE
+
+  exit 1
+}
+
+env_path="environment"
+region="global"
+datacenter="default"
+platform_os="linux"
+platform_arch="amd64"
+
+while [ -n "$1" ]; do
+  case $1 in
+  "--datacenter")
+    shift
+    datacenter="$1"
+    ;;
+  "--region")
+    shift
+    region="$1"
+    ;;
+  "--os")
+    shift
+    platform_os="$1"
+    ;;
+  "--arch")
+    shift
+    platform_arch="$1"
+    ;;
+  "--env")
+    shift
+    env_path="$1"
+    ;;
+
+  --*)
+    echo "Invalid flag `$1`" >&2
+    usage
+    ;;
+
+  *)
+    target="$1"
+  esac
+  shift
+done
+
+if [ -z "$target" ]; then
+  echo "Missing required argument TARGET" >&2
+  usage
+fi
+
+source "$env_path"
+platform="${platform_os}_${platform_arch}"
+
+files="${files} bin/vault_${VAULT_VERSION}_${platform}"
+files="${files} bin/vault-yubikey-helper_${VAULT_YK_HELPER_VERSION}_${platform}"
+files="${files} conf/vault/"
+files="${files} ca/certs/vault-listener-${target}.pem"
+files="${files} ca/roots.pem"
+
+## Establish a persistent command-master session
+ssh -N -o "ControlMaster=yes" -f "$target"
+
+## Stop the command-master process before exiting
+trap "ssh -O exit \"$target\"" exit
+
+## Create vault user, prepare directories
+ssh "$target" <<SCRIPT
+set -ex
+
+if [ \$(systemctl is-active vault.service) != "inactive" ]; then
+  sudo systemctl stop vault.service
+fi
+
+if ! grep vault /etc/passwd >/dev/null; then
+  sudo useradd --home-dir /var/lib/vault --no-create-home --shell /usr/sbin/nologin --system vault
+fi
+
+sudo mkdir -p /usr/local/libexec/vault /etc/vault /var/lib/vault
+sudo chmod -R 0700 /var/lib/vault
+sudo chown -R vault:vault /var/lib/vault
+SCRIPT
+
+## Generate a private-key and signing-request
+./scripts/request-cert --path /var/cert/yk/vault/listener --owner vault --datacenter $datacenter --region $region --server $target vault-listener
+
+## Sign the listener certificate request
+./bin/vault-yubikey-helper pki sign --req-in "ca/requests/vault-listener-${target}.pem" --cert-out "ca/certs/vault-listener-${target}.pem"
+## Export the CA certificate
+./bin/vault-yubikey-helper pki cert --cert-out ca/roots.pem
+
+echo "Provisioning Vault on ${target}"
+ssh "$target" mkdir -p provisioning/vault
+rsync -av --delete $files "${target}:provisioning/vault"
+
+ssh $target <<SCRIPT
+set -ex
+
+pushd provisioning/vault
+
+sudo cp "vault_${VAULT_VERSION}_${platform}" /usr/local/bin/vault
+sudo cp "vault-yubikey-helper_${VAULT_YK_HELPER_VERSION}_${platform}" /usr/local/libexec/vault-yubikey-helper
+sudo cp *.service /etc/systemd/system/
+sudo cp "vault-listener-${target}.pem" /var/cert/yk/vault/listener/cert.pem
+sudo cp roots.pem /var/cert/yk/roots.pem
+sudo cp *.hcl /etc/vault/
+
+## cluster_name
+sudo tee /etc/vault/locale.hcl <<HCL
+cluster_name = "${datacenter}"
+HCL
+
+## Raft node_id and YUBIKEY_PIN
+sudo tee /etc/vault/vault.env << ENV
+VAULT_RAFT_NODE_ID="\$(hostname -s)"
+YUBIKEY_PIN="${TARGET_YUBIKEY_PIN}"
+ENV
+
+sudo chmod 0600 /etc/vault/vault.env
+
+if [ \$(systemctl is-enabled vault.service) != "enabled" ]; then
+  sudo systemctl enable --now vault.service vault-unseal.service
+else
+  sudo systemctl daemon-reload
+  sudo systemctl restart vault.service
+fi
+popd
+SCRIPT

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -e
+
+if [ -z "$1" ]; then
+  echo "Missing required argument TARGET" >&2
+  exit 1
+fi
+
+ssh "$1" <<SCRIPT
+set -ex
+
+sudo systemctl disable --now vault.service
+sudo rm -rf /usr/local/libexec/vault /etc/vault /var/cert/vault /var/lib/vault
+sudo rm -f /usr/local/bin/vault
+sudo rm -f /etc/systemd/system/vault*.service
+SCRIPT

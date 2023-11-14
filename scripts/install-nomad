@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -e
+
+usage() {
+  cat >&2 <<USAGE
+  USAGE: $0 [--server] [--datacenter DC] [--region REGION] [--os OS] [--arch ARCH] [--env FILE] TARGET
+USAGE
+
+  exit 1
+}
+
+env_path="environment"
+region="global"
+datacenter="default"
+platform_os="linux"
+platform_arch="amd64"
+
+while [ -n "$1" ]; do
+  case $1 in
+  "--server")
+    files="${files} conf/nomad/server.hcl"
+    ;;
+  "--datacenter")
+    shift
+    datacenter="$1"
+    ;;
+  "--region")
+    shift
+    region="$1"
+    ;;
+  "--os")
+    shift
+    platform_os="$1"
+    ;;
+  "--arch")
+    shift
+    platform_arch="$1"
+    ;;
+  "--env")
+    shift
+    env_path="$1"
+    ;;
+
+  --*)
+    echo "Invalid flag `$1`" >&2
+    usage
+    ;;
+
+  *)
+    target="$1"
+  esac
+  shift
+done
+
+if [ -z "$target" ]; then
+  echo "Missing required argument TARGET" >&2
+  usage
+fi
+
+source "$env_path"
+platform="${platform_os}_${platform_arch}"
+
+files="${files} bin/nomad_${NOMAD_VERSION}_${platform}"
+files="${files} bin/nomad-driver-podman_${NOMAD_PODMAN_VERSION}_${platform}"
+files="${files} bin/nomad-usb-device-plugin_${NOMAD_USB_VERSION}_${platform}"
+files="${files} ${os}/nomad/nomad.hcl"
+files="${files} ${os}/nomad/nomad.service"
+
+## Establish a persistent command-master session
+ssh -N -o "ControlMaster=yes" -f $target
+
+## Stop the command-master process before exiting
+trap "ssh -O exit $target" exit
+
+ssh $target mkdir -p provisioning/nomad
+rsync -av --delete $files ${target}:provisioning/nomad
+
+ssh $target <<SCRIPT
+set -ex
+sudo mkdir -p /usr/local/libexec/nomad /etc/nomad /var/data/{ephemeral,nomad}
+
+if [ \$(systemctl is-active nomad.service) != "inactive" ]; then
+  sudo systemctl stop nomad.service
+fi
+
+pushd provisioning/nomad
+
+sudo cp nomad_${NOMAD_VERSION}_${platform} /usr/local/bin/nomad
+sudo cp nomad-driver-podman_${NOMAD_PODMAN_VERSION}_${platform} /usr/local/libexec/nomad/podman
+sudo cp nomad-usb-device-plugin_${NOMAD_USB_VERSION}_${platform} /usr/local/libexec/nomad/usb
+sudo cp nomad.service /etc/systemd/system/
+sudo cp *.hcl /etc/nomad/
+
+sudo tee /etc/nomad/locale.hcl <<HCL
+region     = "${region}"
+datacenter = "${datacenter}"
+HCL
+
+sudo systemctl enable --now podman.socket
+
+if [ \$(systemctl is-enabled nomad.service) != "enabled" ]; then
+  sudo systemctl enable --now nomad.service
+else
+  sudo systemctl daemon-reload
+  sudo systemctl restart nomad.service
+fi
+
+popd
+SCRIPT
