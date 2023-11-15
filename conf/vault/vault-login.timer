@@ -1,0 +1,8 @@
+[Unit]
+ConditionFileNotEmpty=/var/lib/vault/yubikey-seal.json
+
+[Timer]
+OnCalendar=daily
+
+[Install]
+WantedBy=timers.target

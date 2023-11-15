@@ -1,0 +1,22 @@
+[Unit]
+Description="vault-yubikey-helper login"
+Documentation=https://github.com/jmanero/vault-yubikey-helper
+
+ConditionFileNotEmpty=/var/lib/vault/yubikey-seal.json
+
+Wants=vault-unseal.service
+After=vault-unseal.service
+
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/vault/vault.env
+ExecStart=/usr/local/libexec/vault-yubikey-helper login --token-ttl 48h --token-path /root/.vault-token /var/lib/vault/yubikey-seal.json
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

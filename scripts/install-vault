@@ -3,20 +3,47 @@ set -e
 
 usage() {
   cat >&2 <<USAGE
-  USAGE: $0 [--datacenter DC] [--region REGION] [--os OS] [--arch ARCH] [--env FILE] TARGET
+  USAGE: $0 [flags] TARGET
+
+  Install vault executable, HCL configuration, vault-yubikey-helper, and systemd
+  service units on a remote host to bootstrap a Vault raft cluster
+
+  Print this and exit
+  --help
+
+  Generate a DN string (/CN=\$target/DC=\$datacenter/C=\$region) for listener
+  certificates. 'datacenter' is also configured as the instance's 'cluster_name'
+  --datacenter DC:default
+  --region REGION:us (Must be 2 characters)
+
+  Initialize a new vault with vault-yubikey-helper
+  --init
+
+  Try to join an existing vault raft cluster after startup
+  --join LEADER_ADDR
+
+  Select executable platform and versions to install
+  --os OS:linux
+  --arch ARCH:amd64
+  --env FILE:environment
+
 USAGE
 
   exit 1
 }
 
 env_path="environment"
-region="global"
+region="xx"
 datacenter="default"
 platform_os="linux"
 platform_arch="amd64"
 
 while [ -n "$1" ]; do
   case $1 in
+  "--help")
+    usage
+    ;;
+
   "--datacenter")
     shift
     datacenter="$1"
@@ -25,6 +52,15 @@ while [ -n "$1" ]; do
     shift
     region="$1"
     ;;
+
+  "--init")
+    init="yes"
+    ;;
+  "--join")
+    shift
+    join="$1"
+    ;;
+
   "--os")
     shift
     platform_os="$1"
@@ -63,27 +99,27 @@ files="${files} conf/vault/"
 files="${files} ca/certs/vault-listener-${target}.pem"
 files="${files} ca/roots.pem"
 
-## Establish a persistent command-master session
+## Establish a persistent control-master session
 ssh -N -o "ControlMaster=yes" -f "$target"
 
-## Stop the command-master process before exiting
+## Stop the control-master process before exiting
 trap "ssh -O exit \"$target\"" exit
 
 ## Create vault user, prepare directories
-ssh "$target" <<SCRIPT
+ssh "$target" sudo bash <<SCRIPT
 set -ex
 
 if [ \$(systemctl is-active vault.service) != "inactive" ]; then
-  sudo systemctl stop vault.service
+  systemctl stop vault.service vault-unseal.service vault-login.service vault-login.timer
 fi
 
 if ! grep vault /etc/passwd >/dev/null; then
-  sudo useradd --home-dir /var/lib/vault --no-create-home --shell /usr/sbin/nologin --system vault
+  useradd --home-dir /var/lib/vault --no-create-home --shell /usr/sbin/nologin --system vault
 fi
 
-sudo mkdir -p /usr/local/libexec/vault /etc/vault /var/lib/vault
-sudo chmod -R 0700 /var/lib/vault
-sudo chown -R vault:vault /var/lib/vault
+mkdir -p /usr/local/libexec/vault /etc/vault /var/lib/vault
+chmod -R 0700 /var/lib/vault
+chown -R vault:vault /var/lib/vault
 SCRIPT
 
 ## Generate a private-key and signing-request
@@ -98,36 +134,48 @@ echo "Provisioning Vault on ${target}"
 ssh "$target" mkdir -p provisioning/vault
 rsync -av --delete $files "${target}:provisioning/vault"
 
-ssh $target <<SCRIPT
+ssh $target sudo bash <<SCRIPT
 set -ex
 
 pushd provisioning/vault
 
-sudo cp "vault_${VAULT_VERSION}_${platform}" /usr/local/bin/vault
-sudo cp "vault-yubikey-helper_${VAULT_YK_HELPER_VERSION}_${platform}" /usr/local/libexec/vault-yubikey-helper
-sudo cp *.service /etc/systemd/system/
-sudo cp "vault-listener-${target}.pem" /var/cert/yk/vault/listener/cert.pem
-sudo cp roots.pem /var/cert/yk/roots.pem
-sudo cp *.hcl /etc/vault/
+cp "vault_${VAULT_VERSION}_${platform}" /usr/local/bin/vault
+cp "vault-yubikey-helper_${VAULT_YK_HELPER_VERSION}_${platform}" /usr/local/libexec/vault-yubikey-helper
+cp *.{service,timer} /etc/systemd/system/
+cp "vault-listener-${target}.pem" /var/cert/yk/vault/listener/cert.pem
+cp roots.pem /var/cert/yk/roots.pem
+cp *.hcl /etc/vault/
+
+popd
 
 ## cluster_name
-sudo tee /etc/vault/locale.hcl <<HCL
+tee /etc/vault/locale.hcl <<HCL
 cluster_name = "${datacenter}"
 HCL
 
 ## Raft node_id and YUBIKEY_PIN
-sudo tee /etc/vault/vault.env << ENV
+tee /etc/vault/vault.env << ENV
 VAULT_RAFT_NODE_ID="\$(hostname -s)"
 YUBIKEY_PIN="${TARGET_YUBIKEY_PIN}"
 ENV
 
-sudo chmod 0600 /etc/vault/vault.env
+chmod 0600 /etc/vault/vault.env
 
 if [ \$(systemctl is-enabled vault.service) != "enabled" ]; then
-  sudo systemctl enable --now vault.service vault-unseal.service
+  systemctl enable --now vault.service vault-unseal.service vault-login.service vault-login.timer || true
 else
-  sudo systemctl daemon-reload
-  sudo systemctl restart vault.service
+  systemctl daemon-reload
+  systemctl start vault-login.timer
+  systemctl restart vault.service vault-unseal.service vault-login.service
 fi
-popd
+
+if [ "$init" == "yes" ]; then
+  /usr/local/libexec/vault-yubikey-helper init /var/lib/vault/yubikey-seal.json
+  systemctl start vault-unseal.service
+elif [ -n "$join" -a -f /var/lib/vault/yubikey-seal.json ]; then
+  VAULT_ADDR=http://127.0.0.1:8200; export VAULT_ADDR
+
+  vault operator raft join -leader-ca-cert=@/var/cert/yk/roots.pem "$join"
+  systemctl start vault-unseal.service
+fi
 SCRIPT

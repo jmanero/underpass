@@ -11,9 +11,10 @@ StartLimitBurst=3
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 EnvironmentFile=-/etc/vault/vault.env
 
-## Wait for the Vault server to start
+## Wait for the Vault server to initialize
 ExecStartPre=/usr/bin/sleep 15
 ExecStart=/usr/local/libexec/vault-yubikey-helper unseal /var/lib/vault/yubikey-seal.json
 

@@ -1,17 +1,61 @@
 #!/usr/bin/env bash
 set -e
 
+usage() {
+  cat >&2 <<USAGE
+  USAGE: $0 [FLAGS] [OPENSSL_REQ_FLAGS] TARGET
+
+  Use 'openssl req' to generate a private key on a remote host and print a
+  certificate signing request for it to STDOUT
+
+  Print this and exit
+  --help
+
+  Defaults to /var/cert/\$name root:[root|wheel]
+  --path TARGET_PATH
+  --owner USER
+  --group GROUP
+
+  Default subject DN: /CN=\$target/DC=\$datacenter/C=\$region
+  --datacenter DC [default]
+  --region REGION [xx] Must be 2 characters
+  --subject DN_STRING
+
+  Default key: EC:P256
+  --key-type [ec | rsa:LENGTH] Setting --key-type will remove any previous --key-opts values
+  --key-opts [-pkeyopt ec_paramgen_curve:prime256v1]
+
+  Overwrite an existing private key. By default, an existing key will be used to generate the CSR
+  --rotate
+
+  Default usage: nonRepudiation,digitalSignature,keyEncipherment extended_usage: serverAuth,clientAuth
+  --usage X509_USAGE
+  --server | --client
+
+
+  Defaults to 'ssh -q \$target bash' for remote provisioning
+  --driver COMMAND
+  Set 'sudo bash' as the driver for local execution
+  --local
+
+  Additional '-flag value' arguments will be passed as flags to the underlying
+  'openssl req' command used to generate private keys and certificate signing requests
+USAGE
+
+  exit 1
+}
+
 rotate=no
 owner=root
 group=$(id -gn root) ## root or wheel?
 
 ## Nomad-isms; datacenter -> vault cluster_name
 datacenter=default
-region=us
+region=xx
 
 ## Generate an EC:P256 key
 key_type=ec
-key_curve="-pkeyopt ec_paramgen_curve:prime256v1"
+key_opts="-pkeyopt ec_paramgen_curve:prime256v1"
 
 ## Defaults for a server+client certificate
 usage="nonRepudiation,digitalSignature,keyEncipherment"
@@ -26,6 +70,10 @@ mkdir -p ca/{requests,certs}
 
 while [ -n "$1" ]; do
   case $1 in
+  "--help")
+    usage
+    ;;
+
   "--path")
     shift
     path="$1"
@@ -47,15 +95,22 @@ while [ -n "$1" ]; do
     shift
     region="$1"
     ;;
+  "--subject")
+    shift
+    subject="$1"
+    ;;
 
+  "--rotate")
+    rotate="yes"
+    ;;
   "--key-type")
     shift
     key_type="$1"
-    key_curve=""
+    key_opts=""
     ;;
-  "--key-curve")
+  "--key-opts")
     shift
-    key_curve="$1"
+    key_opts="$1"
     ;;
 
   "--usage")
@@ -74,12 +129,7 @@ while [ -n "$1" ]; do
     driver="$1"
     ;;
   "--local")
-    driver="bash"
-    ;;
-
-  "--subject")
-    shift
-    subject="$1"
+    driver="sudo bash"
     ;;
   -*) ## Add to openssl req arguments
     req_args="$req_args $1 $2"
@@ -130,7 +180,7 @@ if sudo [ -f "${path}/key.pem" -a "$rotate" != "yes" ]; then
   key_args="-key ${path}/key.pem"
 else
   echo "Generating new $key_type key at ${target}:${path}/key.pem" >&2
-  key_args="-newkey $key_type $key_curve -nodes -keyout ${path}/key.pem"
+  key_args="-newkey $key_type $key_opts -nodes -keyout ${path}/key.pem"
 fi
 
 ## Print CSR back to driver's STDOUT
